@@ -62,6 +62,9 @@ func startWorkers(fileName string, nbWorkers int, env PreparedEnv) error {
 			for {
 				// Create main dummy request
 				r, err := http.NewRequest(http.MethodGet, filepath.Base(absFileName), nil)
+
+				metrics.StartWorker(absFileName)
+
 				if err != nil {
 					panic(err)
 				}
@@ -89,6 +92,7 @@ func startWorkers(fileName string, nbWorkers int, env PreparedEnv) error {
 
 				// TODO: make the max restart configurable
 				if _, ok := workersRequestChans.Load(absFileName); ok {
+					metrics.StopWorker(absFileName)
 					workersReadyWG.Add(1)
 					if fc.exitStatus == 0 {
 						l.Info("restarting", zap.String("worker", absFileName))

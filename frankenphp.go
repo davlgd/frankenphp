@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/maypok86/otter"
@@ -69,6 +70,8 @@ var (
 
 	loggerMu sync.RWMutex
 	logger   *zap.Logger
+
+	metrics Metrics = NullMetrics{}
 )
 
 type syslogLevel int
@@ -125,6 +128,7 @@ type FrankenPHPContext struct {
 
 	done                 chan interface{}
 	currentWorkerRequest cgo.Handle
+	startedAt            time.Time
 }
 
 func clientHasClosed(r *http.Request) bool {
@@ -270,12 +274,17 @@ func Init(options ...Option) error {
 
 	maxProcs := runtime.GOMAXPROCS(0)
 
+	if opt.metrics != nil {
+		metrics = opt.metrics
+	}
+
 	var numWorkers int
 	for i, w := range opt.workers {
 		if w.num <= 0 {
 			// https://github.com/dunglas/frankenphp/issues/126
 			opt.workers[i].num = maxProcs * 2
 		}
+		metrics.TotalWorkers(w.fileName, w.num)
 
 		numWorkers += opt.workers[i].num
 	}
@@ -290,6 +299,8 @@ func Init(options ...Option) error {
 	} else if opt.numThreads <= numWorkers {
 		return NotEnoughThreads
 	}
+
+	metrics.TotalThreads(opt.numThreads)
 
 	config := Config()
 
@@ -443,12 +454,20 @@ func ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) error 
 	}
 
 	fc.responseWriter = responseWriter
+	fc.startedAt = time.Now()
+
+	isWorker := nil == fc.responseWriter
+	isWorkerRequest := false
 
 	rc := requestChan
 	// Detect if a worker is available to handle this request
-	if nil != fc.responseWriter {
+	if !isWorker {
 		if v, ok := workersRequestChans.Load(fc.scriptFilename); ok {
+			isWorkerRequest = true
+			metrics.StartWorkerRequest(fc.scriptFilename)
 			rc = v.(chan *http.Request)
+		} else {
+			metrics.StartRequest()
 		}
 	}
 
@@ -456,6 +475,14 @@ func ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) error 
 	case <-done:
 	case rc <- request:
 		<-fc.done
+	}
+
+	if !isWorker {
+		if isWorkerRequest {
+			metrics.StopWorkerRequest(fc.scriptFilename, time.Since(fc.startedAt))
+		} else {
+			metrics.StopRequest()
+		}
 	}
 
 	return nil
